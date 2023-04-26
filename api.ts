@@ -1,5 +1,6 @@
+import { Controller, Get, Post, Body, Param } from '@nestjs/common';
 import axios from 'axios';
-import { Connection, createConnection } from 'typeorm';
+import { createConnection } from 'typeorm';
 
 interface CoinData {
   totalSupply: number;
@@ -17,51 +18,116 @@ interface MarketCapData {
   eth: number;
 }
 
-async function connectToDatabase(): Promise<Connection> {
-  return createConnection({
+@Entity()
+export class Coin {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column()
+  totalSupply: number;
+
+  @Column()
+  currentPrice: number;
+
+  @Column()
+  usdMarketCap: number;
+
+  @Column()
+  btcMarketCap: number;
+
+  @Column()
+  ethMarketCap: number;
+}
+
+@Controller()
+export class AppController {
+  @Get('total-supply')
+  async getTotalSupply(): Promise<number> {
+    const coin = await Coin.findOne();
+    return coin.totalSupply;
+  }
+
+  @Get('current-price')
+  async getCurrentPrice(): Promise<number> {
+    const coin = await Coin.findOne();
+    return coin.currentPrice;
+  }
+
+  @Get('market-cap/:unit')
+  async getMarketCap(@Param('unit') unit: string): Promise<number> {
+    const coin = await Coin.findOne();
+    let marketCap;
+
+    switch (unit.toLowerCase()) {
+      case 'usd':
+        marketCap = coin.usdMarketCap;
+        break;
+      case 'btc':
+        marketCap = coin.btcMarketCap;
+        break;
+      case 'eth':
+        marketCap = coin.ethMarketCap;
+        break;
+      default:
+        throw new Error(`Invalid unit specified: ${unit}`);
+    }
+
+    return marketCap;
+  }
+
+  @Post('update-data')
+  async updateData(): Promise<void> {
+    const baserowApiKey = process.env.BASEROW_API_KEY;
+    const coingeckoApiKey = process.env.COINGECKO_API_KEY;
+
+    if (!baserowApiKey || !coingeckoApiKey) {
+      throw new Error('Missing API keys in environment variables');
+    }
+
+    const baserowResponse = await axios.get(`https://api.baserow.io/api/database/1/table/2/rows/?filter__order_by=-id&limit=1`, {
+      headers: {
+        Authorization: `Bearer ${baserowApiKey}`,
+      },
+    });
+
+    const { totalSupply, currentPrice } = baserowResponse.data[0].fields;
+
+    const coingeckoResponse = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd`, {
+      headers: {
+        Authorization: `Bearer ${coingeckoApiKey}`,
+      },
+    });
+
+    const { bitcoin: { usd: btcPrice }, ethereum: { usd: ethPrice } } = coingeckoResponse.data;
+
+    const usdMarketCap = totalSupply * currentPrice;
+    const btcMarketCap = usdMarketCap / btcPrice;
+    const ethMarketCap = usdMarketCap / ethPrice;
+
+    const coin = await Coin.findOne();
+    coin.totalSupply = totalSupply;
+    coin.currentPrice = currentPrice;
+    coin.usdMarketCap = usdMarketCap;
+    coin.btcMarketCap = btcMarketCap;
+    coin.ethMarketCap = ethMarketCap;
+    await coin.save();
+  }
+}
+
+async function bootstrap() {
+  const connection = await createConnection({
     type: 'postgres',
-    host: 'localhost',
-    port: 5432,
-    username: 'your_username',
-    password: 'your_password',
-    database: 'your_database',
-    entities: [], 
-    synchronize: true,
-  });
+    host: process.env.POSTGRES_HOST,
+    port: parseInt(process.env.POSTGRES_PORT),
+username: process.env.POSTGRES_USERNAME,
+password: process.env.POSTGRES_PASSWORD,
+database: process.env.POSTGRES_DATABASE,
+entities: [Coin],
+synchronize: true,
+});
+
+const app = await NestFactory.create(AppModule);
+app.enableCors();
+await app.listen(3000);
 }
-
-export async function getCoinData(): Promise<CoinData> {
-  const response = await axios.get('https://api.baserow.io/api/database/1/table/2/rows/'); // Here we assume that the data is saved there, to be modified according to Baserow architecture.
-
-  const { total_supply: totalSupply, current_price: currentPrice } = response.data[0].fields;
-
-  return { totalSupply, currentPrice };
-}
-
-export async function getExternalPriceData(): Promise<ExternalPriceData> {
-  const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd');
-
-  const { bitcoin: { usd: btcPrice }, ethereum: { usd: ethPrice } } = response.data;
-
-  return { btcPrice, ethPrice };
-}
-
-export function getMarketCapData(coinData: CoinData, externalPriceData: ExternalPriceData): MarketCapData {
-  const usdMarketCap = coinData.totalSupply * coinData.currentPrice;
-  const btcMarketCap = usdMarketCap / externalPriceData.btcPrice;
-  const ethMarketCap = usdMarketCap / externalPriceData.ethPrice;
-
-  return { usd: usdMarketCap, btc: btcMarketCap, eth: ethMarketCap };
-}
-
-export async function updateCoinData(): Promise<void> {
-  const coinData = await getCoinData();
-  const externalPriceData = await getExternalPriceData();
-  const marketCapData = getMarketCapData(coinData, externalPriceData);
-
-  const connection = await connectToDatabase();
-
-  await connection.query(`INSERT INTO coin_data (total_supply, current_price, usd_market_cap, btc_market_cap, eth_market_cap) VALUES (${coinData.totalSupply}, ${coinData.currentPrice}, ${marketCapData.usd}, ${marketCapData.btc}, ${marketCapData.eth})`);
-
-  await connection.close();
-}
+bootstrap();
